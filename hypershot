@@ -19,30 +19,17 @@ local mdl = nil
 local prt = nil
 local hl = nil
 
--- DEFAULT CONFIGS
-cfg.FOV = cfg.FOV or 300
-cfg.AimlockKey = cfg.AimlockKey or "E"
-cfg.ModeSwitchKey = cfg.ModeSwitchKey or "C"
-cfg.AimMode = cfg.AimMode or "Toggle"
-cfg.RotateCharacter = (cfg.RotateCharacter ~= false)
-cfg.UnlockZoom = (cfg.UnlockZoom ~= false)
-cfg.LegitMode = (cfg.LegitMode == true)
-cfg.UsePrediction = (cfg.UsePrediction == true)
-cfg.PredictionOffset = cfg.PredictionOffset or 2
-cfg.ForceMouseLock = (cfg.ForceMouseLock == true)
-cfg.AutoLockRadius = cfg.AutoLockRadius or 60
-
 local aimIsMouse = cfg.AimlockKey == "MouseButton2"
-local aimKey = aimIsMouse and Enum.UserInputType.MouseButton2 or Enum.KeyCode[cfg.AimlockKey]
-local modeKey = Enum.KeyCode[cfg.ModeSwitchKey]
-local aimType = cfg.AimMode
-local rot = cfg.RotateCharacter
-local zoom = cfg.UnlockZoom
-local legit = cfg.LegitMode
-local pred = cfg.UsePrediction
-local poff = cfg.PredictionOffset
-local lockm = cfg.ForceMouseLock
-local rad = cfg.AutoLockRadius
+local aimKey = aimIsMouse and Enum.UserInputType.MouseButton2 or Enum.KeyCode[(cfg.AimlockKey or "E")]
+local modeKey = Enum.KeyCode[(cfg.ModeSwitchKey or "C")]
+local aimType = cfg.AimMode or "Toggle"
+local rot = not (cfg.RotateCharacter == false)
+local zoom = not (cfg.UnlockZoom == false)
+local legit = cfg.LegitMode == true
+local pred = cfg.UsePrediction == true
+local poff = cfg.PredictionOffset or 2
+local lockm = cfg.ForceMouseLock == true
+local rad = cfg.AutoLockRadius or 60
 
 if zoom then
     pcall(function()
@@ -123,31 +110,38 @@ local function getList()
     return t
 end
 
--- ⭐ NEW FOV-BASED TARGET FINDER
+-- 🔹 UPDATED look() FUNCTION: prioritizes closest targets first
 local function look()
     if not cam then
         cam = ws.CurrentCamera
         if not cam then return nil end
     end
-    
-    local mid = cam.ViewportSize / 2
-    local bestDist = math.huge
-    local best = nil
-    
-    for _,d in ipairs(getList()) do
-        local v,on = cam:WorldToViewportPoint(d.p.Position)
-        if on then
-            local dist = (Vector2.new(v.X,v.Y) - mid).Magnitude
 
-            if dist <= cfg.FOV then
-                if dist < bestDist then
-                    bestDist = dist
-                    best = d
-                end
+    local mid = cam.ViewportSize / 2
+    local bestScore = math.huge
+    local best = nil
+
+    local c = lp.Character
+    if not c then return nil end
+    local hrp = c:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    for _, d in ipairs(getList()) do
+        local v, on = cam:WorldToViewportPoint(d.p.Position)
+        if on then
+            local distToCenter = (Vector2.new(v.X, v.Y) - mid).Magnitude
+            local distToPlayer = (d.p.Position - hrp.Position).Magnitude
+
+            -- Score prioritizes closer targets to player first
+            local score = distToPlayer * 2 + distToCenter
+
+            if score < bestScore then
+                bestScore = score
+                best = d
             end
         end
     end
-    
+
     return best
 end
 
