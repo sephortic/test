@@ -253,7 +253,9 @@ rs.RenderStepped:Connect(function()
     cam.CFrame = CFrame.new(cam.CFrame.Position, aim)
 
     if rot then
-        local d = (aim - hrp.Position).Unit
-        hrp.CFrame = CFrame.new(hrp.Position, hrp.Position + Vector3.new(d.X,0,d.Z))
+        -- Smooth HRP rotation to avoid gun weirdness
+        local d = (aim - hrp.Position)
+        local look = CFrame.new(hrp.Position, hrp.Position + Vector3.new(d.X, 0, d.Z))
+        hrp.CFrame = hrp.CFrame:Lerp(look, 0.3) -- 0.3 = smoothness factor
     end
 end)
