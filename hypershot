@@ -1,0 +1,389 @@
+local cfg = getgenv().CamlockSettings or {}
+local ntf = loadstring(game:HttpGet("https://raw.githubusercontent.com/lobox920/Notification-Library/Main/Library.lua"))(
+)
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+local Mobs = Workspace:FindFirstChild("Mobs")
+
+-- CONFIG (from getgenv or sensible defaults)
+local AIM_KEY_NAME = cfg.AimlockKey or "E" -- supports "MouseButton2" for RMB
+local AIM_IS_MOUSE = AIM_KEY_NAME == "MouseButton2"
+local AIM_KEY = AIM_IS_MOUSE and Enum.UserInputType.MouseButton2 or Enum.KeyCode[AIM_KEY_NAME]
+local MODE_SWITCH_KEY = Enum.KeyCode[(cfg.ModeSwitchKey or "C")]
+local AIM_TYPE = cfg.AimMode or "Toggle" -- "Toggle" or "Hold"
+local ROTATE_CHARACTER = not (cfg.RotateCharacter == false)
+local UNLOCK_ZOOM = not (cfg.UnlockZoom == false)
+local LEGIT = cfg.LegitMode == true
+local USE_PREDICTION = cfg.UsePrediction == true
+local PREDICTION_OFFSET = cfg.PredictionOffset or 2 -- used only if UsePrediction
+local FORCE_MOUSE_LOCK = cfg.ForceMouseLock == true
+local AUTOLOCK_RADIUS = cfg.AutoLockRadius or 60
+local SMOOTHING = cfg.Smoothing or 0 -- 0 = instant, >0 = lerp factor (0-1)
+local BULLET_SPEED = cfg.BulletSpeed or 180 -- estimate projectile speed; tune for the game
+local FOV_RADIUS = cfg.FOVRadius or 100 -- pixels from crosshair to lock if multiple targets
+
+-- apply zoom unlock if requested
+if UNLOCK_ZOOM then
+pcall(function()
+LocalPlayer.CameraMaxZoomDistance = 999
+LocalPlayer.CameraMinZoomDistance = 0.5
+end)
+end
+
+-- notifications helper
+local function notify(title, text, duration)
+pcall(function() ntf:SendNotification(title, text, duration or 3) end)
+end
+
+-- utility checks
+local function isBot(model)
+return Mobs and model:IsDescendantOf(Mobs)
+end
+
+local function isEnemy(model)
+local myChar = LocalPlayer.Character
+if not myChar then return false end
+local myTeam = myChar:GetAttribute("Team")
+local theirTeam = model:GetAttribute("Team")
+if not myTeam or myTeam == -1 then return true end
+if not theirTeam then return true end
+return myTeam ~= theirTeam
+end
+
+local function allowTarget(model)
+local bot = isBot(model)
+local mode = _G.CamlockMode or "Both" -- preserved between changes
+if mode == "Both" then return true end
+if mode == "Bot" and bot then return true end
+if mode == "Player" and not bot then return true end
+return false
+end
+
+-- highlight management
+local highlight = nil
+local function makeHighlight(model)
+if highlight then
+pcall(function() highlight:Destroy() end)
+highlight = nil
+end
+if not model then return end
+local h = Instance.new("Highlight")
+h.FillTransparency = 0.5
+h.OutlineTransparency = 0
+h.FillColor = Color3.fromRGB(255, 0, 0)
+h.OutlineColor = Color3.fromRGB(255, 255, 255)
+h.Adornee = model
+h.Parent = model
+highlight = h
+end
+
+local function clearHighlight()
+if highlight then
+pcall(function() highlight:Destroy() end)
+highlight = nil
+end
+end
+
+-- mode cycling
+local modes = {"Both", "Bot", "Player"}
+local modeIndex = 1
+_G.CamlockMode = modes[modeIndex]
+local function switchMode()
+modeIndex = modeIndex + 1
+if modeIndex > #modes then modeIndex = 1 end
+_G.CamlockMode = modes[modeIndex]
+notify("Info", "Mode: ".._G.CamlockMode)
+end
+
+-- build list of potential targets
+local function getTargets()
+local list = {}
+if Mobs then
+for _,m in ipairs(Mobs:GetChildren()) do
+local fakehrp = m:FindFirstChild("FakeHRP")
+if fakehrp and isEnemy(m) and allowTarget(m) then
+table.insert(list, {m = m, p = fakehrp, isBot = true})
+end
+end
+end
+for _,m in ipairs(Workspace:GetChildren()) do
+if m ~= LocalPlayer.Character and m:IsA("Model") then
+local hum = m:FindFirstChildOfClass("Humanoid")
+local hrp = m:FindFirstChild("HumanoidRootPart")
+if hum and hrp and hum.Health > 0 and isEnemy(m) and allowTarget(m) then
+table.insert(list, {m = m, p = hrp, isBot = false})
+end
+end
+end
+return list
+end
+
+-- select target under user's crosshair (uses actual mouse position)
+local function findUnderCrosshair(maxPixels)
+if not Camera then Camera = Workspace.CurrentCamera end
+if not Camera then return nil end
+local mouse = LocalPlayer:GetMouse()
+local best = nil
+local bestDist = maxPixels or FOV_RADIUS
+for _,entry in ipairs(getTargets()) do
+local pos = entry.p.Position
+local screenPos, onScreen = Camera:WorldToViewportPoint(pos)
+if onScreen then
+local dist2d = (Vector2.new(screenPos.X, screenPos.Y) - Vector2.new(mouse.X, mouse.Y)).Magnitude
+if dist2d <= bestDist then
+bestDist = dist2d
+best = entry
+end
+end
+end
+return best
+end
+
+-- select nearest target to player within radius (fallback)
+local function findNearest(radius)
+local char = LocalPlayer.Character
+if not char then return nil end
+local hrp = char:FindFirstChild("HumanoidRootPart")
+if not hrp then return nil end
+local best = nil
+local bestDist = radius or AUTOLOCK_RADIUS
+for _,entry in ipairs(getTargets()) do
+local d = (entry.p.Position - hrp.Position).Magnitude
+if d < bestDist then
+bestDist = d
+best = entry
+end
+end
+return best
+end
+
+-- lock state
+local locked = false
+local lockedModel = nil
+local lockedPart = nil
+
+local function lockTo(entry)
+if not entry then return end
+locked = true
+lockedModel = entry.m
+lockedPart = entry.p
+makeHighlight(lockedModel)
+notify("Success", "Locked onto "..entry.m.Name.." ["..(entry.isBot and "BOT" or "REAL").."]")
+end
+
+local function unlock()
+locked = false
+lockedModel = nil
+lockedPart = nil
+clearHighlight()
+notify("Info", "Unlocked")
+end
+
+-- input helpers
+local function isAimInput(input)
+if AIM_IS_MOUSE then
+return input.UserInputType == AIM_KEY
+else
+return input.KeyCode == AIM_KEY
+end
+end
+
+-- input listeners
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+if gameProcessed then return end
+if input.KeyCode == MODE_SWITCH_KEY then
+switchMode()
+return
+end
+
+if AIM_TYPE == "Hold" then
+    if isAimInput(input) then
+        if not locked then
+            local t = findUnderCrosshair(FOV_RADIUS)
+            if t then lockTo(t) else notify("Warning","No target found") end
+        end
+    end
+else -- Toggle
+    if isAimInput(input) then
+        if locked then
+            unlock()
+        else
+            local t = findUnderCrosshair(FOV_RADIUS)
+            if t then lockTo(t) else notify("Warning","No target found") end
+        end
+    end
+end
+
+
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+if AIM_TYPE == "Hold" and isAimInput(input) then
+unlock()
+end
+end)
+
+-- helper: estimate intercept point using simple projectile prediction
+local function getPredictedPosition(targetPos, targetVelocity, originPos, bulletSpeed)
+-- distance and travel time
+local toTarget = targetPos - originPos
+local dist = toTarget.Magnitude
+if bulletSpeed <= 0 then return targetPos end
+local travelTime = dist / bulletSpeed
+-- defensive: clamp travelTime with optional user offset
+if PREDICTION_OFFSET and type(PREDICTION_OFFSET) == "number" then
+travelTime = travelTime * PREDICTION_OFFSET
+end
+return targetPos + targetVelocity * travelTime
+end
+
+-- smoothing helper (slerp-esque for CFrame lookAt)
+local function smoothLook(currentCFrame, originPos, targetPos, smoothFactor)
+if not smoothFactor or smoothFactor <= 0 then
+return CFrame.lookAt(originPos, targetPos)
+end
+local desired = CFrame.lookAt(originPos, targetPos)
+-- interpolate between current and desired
+local pos = currentCFrame.Position:Lerp(desired.Position, smoothFactor)
+-- for orientation, slerp by converting to unit vectors
+local currentLook = currentCFrame.LookVector
+local desiredLook = desired.LookVector
+local lerpedLook = currentLook:Lerp(desiredLook, smoothFactor).Unit
+return CFrame.lookAt(pos, pos + lerpedLook)
+end
+
+-- main update loop
+RunService.RenderStepped:Connect(function(dt)
+if not Camera then Camera = Workspace.CurrentCamera end
+if not Camera then return end
+
+-- auto-acquire nearest if current target invalid
+if locked and (not lockedModel or not lockedModel.Parent or not isEnemy(lockedModel) or not allowTarget(lockedModel)) then
+    unlock()
+    local nxt = findNearest(AUTOLOCK_RADIUS)
+    if nxt then lockTo(nxt) end
+end
+
+-- apply mouse lock behavior if requested
+if locked and FORCE_MOUSE_LOCK then
+    UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+end
+
+if not locked or not lockedModel or not lockedPart then return end
+
+-- ensure character valid
+local char = LocalPlayer.Character
+if not char then return end
+local hrp = char:FindFirstChild("HumanoidRootPart")
+local humanoid = char:FindFirstChildOfClass("Humanoid")
+if not hrp or not humanoid then return end
+
+humanoid.AutoRotate = not ROTATE_CHARACTER
+
+-- compute aim target (with prediction & legit jitter)
+local aimPos = lockedPart.Position
+if USE_PREDICTION then
+    -- better prediction: estimate travelTime using BULLET_SPEED; fallback to simple multiplier
+    aimPos = getPredictedPosition(lockedPart.Position, (lockedPart.Velocity or Vector3.new()), Camera.CFrame.Position, BULLET_SPEED)
+else
+    -- small offset option (legacy)
+    if PREDICTION_OFFSET and type(PREDICTION_OFFSET) == "number" and PREDICTION_OFFSET ~= 1 then
+        aimPos = aimPos + lockedPart.Velocity * PREDICTION_OFFSET
+    end
+end
+
+if LEGIT then
+    aimPos = aimPos + Vector3.new(
+        math.random(-3,3)/100,
+        math.random(-3,3)/100,
+        math.random(-3,3)/100
+    )
+end
+
+-- update camera CFrame (smoothed)
+local origin = Camera.CFrame.Position
+local targetCFrame = smoothLook(Camera.CFrame, origin, aimPos, SMOOTHING)
+Camera.CFrame = targetCFrame
+
+-- rotate player body horizontally to face target when requested (preserve Y for smoothness)
+if ROTATE_CHARACTER then
+    local dir = (aimPos - hrp.Position)
+    if dir.Magnitude > 0 then
+        local flatDir = Vector3.new(dir.X, 0, dir.Z).Unit
+        local targetHrpf = CFrame.lookAt(hrp.Position, hrp.Position + flatDir)
+        if SMOOTHING and SMOOTHING > 0 then
+            hrp.CFrame = hrp.CFrame:Lerp(targetHrpf, math.clamp(SMOOTHING * 1.5, 0, 1))
+        else
+            hrp.CFrame = targetHrpf
+        end
+    end
+end
+
+
+end)
+
+-- optional: draw a simple FOV circle on screen using Drawing (if available) when locked off
+local success, Drawing = pcall(function() return Drawing end)
+local fovCircle = nil
+if success and Drawing and cfg.ShowFOV ~= false then
+pcall(function()
+fovCircle = Drawing.new("Circle")
+fovCircle.Visible = true
+fovCircle.Transparency = 1
+fovCircle.Thickness = 1
+fovCircle.NumSides = 45
+fovCircle.Radius = FOV_RADIUS
+fovCircle.Filled = false
+-- update each frame
+RunService.RenderStepped:Connect(function()
+if not Camera then Camera = Workspace.CurrentCamera end
+local mouse = LocalPlayer:GetMouse()
+if fovCircle then
+fovCircle.Position = Vector2.new(mouse.X, mouse.Y)
+fovCircle.Radius = FOV_RADIUS
+fovCircle.Color = Color3.fromRGB(255, 255, 255)
+fovCircle.Visible = true
+end
+end)
+end)
+end
+
+-- expose small API to toggle and configure runtime
+_G.Camlock = {
+Lock = function()
+local t = findUnderCrosshair(FOV_RADIUS) or findNearest(AUTOLOCK_RADIUS)
+if t then lockTo(t) end
+end,
+Unlock = function() unlock() end,
+Toggle = function()
+if locked then unlock() else _G.Camlock.Lock() end
+end,
+SetBulletSpeed = function(v) BULLET_SPEED = v end,
+SetSmoothing = function(v) SMOOTHING = v end,
+SetFOV = function(v) FOV_RADIUS = v end,
+SetMode = function(m)
+for i,mm in ipairs(modes) do
+if mm == m then modeIndex = i; _G.CamlockMode = mm; notify("Info","Mode: "..mm); break
+end
+end
+end
+}
+
+-- initial notification
+notify("Camlock", "Camlock loaded. Press "..tostring(AIM_KEY_NAME).." to lock. Mode: ".._G.CamlockMode, 4)
+
+-- auto-clean highlight on script end (if script is removed)
+if script and script.Destroying then
+script.Destroying:Connect(function()
+clearHighlight()
+if fovCircle then
+pcall(function() fovCircle:Remove() end)
+end
+end)
+end
