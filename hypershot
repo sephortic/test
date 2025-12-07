@@ -110,7 +110,6 @@ local function getList()
     return t
 end
 
--- 🔹 UPDATED look() FUNCTION: prioritizes closest targets first
 local function look()
     if not cam then
         cam = ws.CurrentCamera
